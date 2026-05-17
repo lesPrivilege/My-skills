@@ -6,7 +6,7 @@ A curated set of Claude Code skills implementing a complete personal knowledge w
 
 Skills are **invocation glue**, not logic containers. Each `SKILL.md` describes what a skill does and how it maps to the real work — the heavy logic lives in external scripts (`scripts/` in this repo, deployed to the user's `~/Scripts/`).
 
-The application layer never integrates LLM APIs directly. It consumes structured output (JSON, markdown) produced by modular tools. This keeps skills portable, testable, and independent of any single provider.
+Skills produce structured output (JSON, markdown) that downstream consumers can use without knowing which LLM generated it. This keeps the pipeline modular and provider-independent at the integration boundaries.
 
 The entire system serves a single arc:
 
@@ -23,32 +23,27 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
                       │   arxiv-browse     │
                       └────────┬──────────┘
                                │
-  ┌──────────────┐   ┌──────────────────────┐
-  │ markitdown    │   │   archive            │
-  │ md-cleaner    │   │   (session archival  │
-  │ ocr-cleaner   │   │    → Auto Memory      │
-  │               │   │    → Obsidian vault)  │
-  └───────┬───────┘   └──────────┬───────────┘
-          │                      │
-          ▼                      ▼
-  ┌──────────────┐   ┌──────────────────────┐
-  │ Mnemos       │   │   paper-mill          │
-  │ questions    │   │   (note synthesis      │
-  │ .json        │   │    engine, 4 modes)    │
-  └───────┬──────┘   └──────────┬───────────┘
-          │                     │
-          │                     ▼
-          │             ┌──────────────────┐
-          │             │   packaging       │
-          │             │ (blog / thread /  │
-          │             │  newsletter)       │
-          │             └──────────────────┘
-          │
-          ▼
-  ┌──────────────────┐
-  │ exam-prep-bank-   │
-  │ fix               │
-  └──────────────────┘
+  ┌──────────────────┐   ┌──────────────────────┐
+  │ markitdown        │   │   archive            │
+  │ md-cleaner        │   │   (session archival  │
+  │                   │   │    → Auto Memory      │
+  │ ocr-cleaner       │   │    → Obsidian vault)  │
+  │  ├─ Phases 1-3    │   │                      │
+  │  ├─ Phase 4       │   └──────────┬───────────┘
+  │  │  exam-prep-    │              │
+  │  │  bank-fix      │              ▼
+  │  └─ Phase 5 merge │   ┌──────────────────────┐
+  │          │        │   │   paper-mill          │
+  │          ▼        │   │   (note synthesis      │
+  │  questions.json   │   │    engine, 4 modes)    │
+  └──────────────────┘   └──────────┬───────────┘
+                                    │
+                                    ▼
+                            ┌──────────────────┐
+                            │   packaging       │
+                            │ (blog / thread /  │
+                            │  newsletter)       │
+                            └──────────────────┘
 
   Design/prototyping path (independent):
   design-prototype → huashu-design → design-migrate (back to source)
@@ -103,9 +98,3 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
 ## Collaboration Rules
 
 `CLAUDE.md` at the repo root defines the conventions and invariants that govern how these skills interact — directory layout, fetch protocol, cleanup logic, and goal-driven execution rules.
-
-The key invariants are:
-- **Scripts in `scripts/`, skills in `skills/`** — skills are invocation glue, not logic containers
-- **No loose files at root** — everything belongs in a directory
-- **Confirm root cause before changing code** — hypothesis-first debugging
-- **Goal-driven execution** — tasks structure as verifiable checkpoints

@@ -1,0 +1,10 @@
+/* ─────── Phone frame (390×844, configurable via CSS vars) ─────── */
+.phone{width:var(--phone-w,390px);height:var(--phone-h,844px);background:var(--bg,#fff);border-radius:var(--phone-radius,44px);border:1px solid var(--border,#ddd);box-shadow:0 4px 12px rgba(0,0,0,.08),0 16px 40px rgba(0,0,0,.08);position:relative;overflow:hidden;isolation:isolate}
+.phone::before{content:"";position:absolute;top:calc(var(--phone-pad,12px) + 12px);left:50%;transform:translateX(-50%);width:var(--di-w,126px);height:var(--di-h,37px);background:#000;border-radius:999px;z-index:30}
+.phone-status{position:absolute;top:var(--phone-pad,12px);left:0;right:0;height:var(--statusbar-h,54px);display:flex;align-items:center;justify-content:space-between;padding:0 32px;font-family:-apple-system,'SF Pro Text',sans-serif;font-size:16px;font-weight:600;color:var(--ink,#000);z-index:20;pointer-events:none}
+.phone-status .right{display:flex;gap:6px;align-items:center}
+.phone-screen{position:absolute;top:calc(var(--phone-pad,12px) + var(--statusbar-h,54px));left:var(--phone-pad,12px);right:var(--phone-pad,12px);bottom:calc(var(--phone-pad,12px) + var(--home-indicator-h,34px));overflow-y:auto;overflow-x:hidden;background:var(--bg,#fff);display:flex;flex-direction:column;scrollbar-width:none}
+.phone-screen::-webkit-scrollbar{display:none}
+.phone-home{position:absolute;bottom:calc(var(--phone-pad,12px) + 10px);left:50%;transform:translateX(-50%);width:140px;height:5px;background:rgba(0,0,0,.3);border-radius:999px;z-index:10}
+:root.dark .phone-home{background:rgba(255,255,255,.5)}
+:root.dark .phone{border-color:rgba(255,255,255,.08);box-shadow:0 4px 12px rgba(0,0,0,.3),0 16px 40px rgba(0,0,0,.3)}

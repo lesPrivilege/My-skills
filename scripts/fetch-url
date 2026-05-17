@@ -1,0 +1,451 @@
+#!/bin/bash
+# fetch-url v2 — universal URL fetcher
+# Cache → domain route → fetch → readability extract → markdown output.
+# stdout: markdown only (truncated at 15k chars)  |  stderr: JSON logs
+#
+# Migration window: when next non-trivial logic is needed (conditional retry,
+# structured error recovery, cache GC), rewrite to Python. Bash is at its limit
+# for this complexity level.
+
+set -euo pipefail
+
+# --- config ---
+CACHE_DIR="$HOME/.cache/fetch"
+CACHE_TTL=$((24 * 3600))
+CURL_TIMEOUT=12
+CURL_RETRIES=2
+PLAYWRIGHT_TIMEOUT=20
+MAX_RESPONSE_BYTES=$((15 * 1024 * 1024))   # 15M for curl
+MAX_OUTPUT_CHARS=15000
+NODE_PATH_VAL="$(npm root -g 2>/dev/null || echo /opt/homebrew/lib/node_modules)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# GitHub API token (optional — raises rate limit from 60 to 5000 req/hr)
+GH_API_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+
+# --- CLI ---
+case "${1:-}" in
+  --clear-cache)
+    rm -rf "$CACHE_DIR"
+    echo "cache cleared: $CACHE_DIR" >&2
+    exit 0 ;;
+  --clear-url)
+    url="${2:-}"
+    [ -z "$url" ] && { echo "usage: fetch-url --clear-url <url>" >&2; exit 1; }
+    raw_k="$(echo -n "$url" | shasum | cut -d' ' -f1)"
+    stripped="$(echo "$url" | sed 's/#.*//' | sed -E 's/[?&](utm_[^=&]+|fbclid|gclid|si|ref)=[^&]*//g')"
+    norm_k="$(echo -n "$stripped" | shasum | cut -d' ' -f1)"
+    rm -f "$CACHE_DIR/$raw_k.md" "$CACHE_DIR/$norm_k.md"
+    echo "cleared cache for: $url" >&2
+    exit 0 ;;
+  --stats)
+    mkdir -p "$CACHE_DIR"
+    entries=0; size=0; oldest=0; newest=0; first=true
+    for f in "$CACHE_DIR"/*.md; do
+      [ -f "$f" ] || continue
+      entries=$((entries + 1))
+      fsize=$(stat -f %z "$f"); size=$((size + fsize))
+      mtime=$(stat -f %m "$f")
+      if $first; then oldest=$mtime; newest=$mtime; first=false
+      else [ "$mtime" -lt "$oldest" ] && oldest=$mtime; [ "$mtime" -gt "$newest" ] && newest=$mtime
+      fi
+    done
+    echo "Cache: $CACHE_DIR"
+    echo "Entries: $entries"
+    if [ "$size" -gt $((1024*1024)) ]; then echo "Size: $((size / 1024 / 1024))M"
+    elif [ "$size" -gt 1024 ]; then echo "Size: $((size / 1024))K"
+    else echo "Size: ${size}B"
+    fi
+    if [ "$entries" -gt 0 ]; then
+      echo "Oldest: $(date -r "$oldest" '+%Y-%m-%d %H:%M')"
+      echo "Newest: $(date -r "$newest" '+%Y-%m-%d %H:%M')"
+    fi
+    exit 0 ;;
+  --mode)
+    FORCE_MODE="${2:-}"
+    URL="${3:-}"
+    shift 3 || true ;;
+  *)
+    URL="${1:-}"
+    FORCE_MODE="" ;;
+esac
+
+[ -z "$URL" ] && { echo '{"error":"usage","msg":"Usage: fetch-url [--mode curl|readability|playwright] <url>"}' >&2; exit 1; }
+
+# cache maintenance: trim entries >48h old
+if mkdir -p "$CACHE_DIR" && find "$CACHE_DIR" -name '*.md' -mtime +2 -delete 2>/dev/null; then
+  :
+fi
+
+# --- helpers ---
+
+log() {
+  local level="$1"; shift
+  local msg="$1"; shift
+  printf '{"t":"%s","l":"%s","url":"%s","msg":"%s"%s}\n' \
+    "$(date -u +%FT%TZ)" "$level" "$URL" "$msg" "${*-}" >&2
+}
+
+# base64 decode — macOS (base64 -d) vs GNU (base64 -d) use same flag,
+# but base64 -D exists on some BSDs. wrapper handles both.
+base64_decode() {
+  base64 -d 2>/dev/null || base64 -D 2>/dev/null
+}
+
+# curl helper with optional GitHub auth
+curl_auth() {
+  if [ -n "$GH_API_TOKEN" ]; then
+    curl -sL --max-time "${2:-10}" -H "Authorization: Bearer $GH_API_TOKEN" "$1"
+  else
+    curl -sL --max-time "${2:-10}" "$1"
+  fi
+}
+
+die() { log "ERROR" "$1"; exit 1; }
+
+TMP_FILES=()
+cleanup() { rm -f "${TMP_FILES[@]:-}"; }
+trap cleanup EXIT
+
+_mktemp() {
+  local f; f="$(mktemp)"; TMP_FILES+=("$f"); echo "$f"
+}
+
+# --- URL normalization ---
+
+normalize_url() {
+  local u="$1"
+  u="${u%%#*}"                                   # strip fragment
+  u="$(echo "$u" | sed -E 's/[?&](utm_[^=&]+|fbclid|gclid|si|ref)=[^&]*//g')"  # tracking
+  echo "$u"
+}
+
+# --- cache (SHA1 key, 24h TTL) ---
+
+cache_key() { echo -n "$1" | shasum | cut -d' ' -f1; }
+
+cache_get() {
+  local key="$1"
+  local path="$CACHE_DIR/$key.md"
+  [ ! -f "$path" ] && return 1
+  local age
+  age=$(( $(date +%s) - $(stat -f %m "$path" 2>/dev/null || echo 0) ))
+  [ "$age" -ge "$CACHE_TTL" ] && { log "INFO" "cache expired" ",\"age_s\":$age"; return 1; }
+  log "INFO" "cache hit" ",\"age_s\":$age"
+  return 0
+}
+
+cache_write() {
+  local key="$1"
+  mkdir -p "$CACHE_DIR"
+  tee "$CACHE_DIR/$key.md"
+}
+
+# --- security ---
+
+security_check() {
+  local u="$1"
+  case "$u" in file://*|ftp://*) die "blocked scheme: ${u%%:*}://" ;; esac
+  local host
+  host="$(echo "$u" | sed -E 's|^https?://([^/?#]+).*|\1|' | tr '[:upper:]' '[:lower:]')"
+  case "$host" in
+    localhost|127.*|0.0.0.0|::1|10.*|192.168.*|169.254.*)
+      die "blocked private host: $host" ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*)
+      die "blocked private host: $host" ;;
+  esac
+}
+
+# --- domain router ---
+
+domain_strategy() {
+  local host="$1"
+  case "$host" in
+    raw.githubusercontent.com|github.com|gist.github.com|*.githubusercontent.com|api.github.com)
+      echo "curl" ;;
+    arxiv.org|browse-export.arxiv.org|export.arxiv.org|*.pdf|dl.acm.org)
+      echo "curl" ;;
+    medium.com|*.medium.com|*.substack.com|*.bbc.com|*.bbc.co.uk|*.nytimes.com|*.wsj.com)
+      echo "readability" ;;
+    *.reddit.com|news.ycombinator.com|*.stackexchange.com|*.stackoverflow.com)
+      echo "readability" ;;
+    *.wikipedia.org)
+      echo "readability" ;;
+    *)
+      echo "auto" ;;
+  esac
+}
+
+# --- HTML→markdown ---
+
+html_to_md() {
+  local html_file="$1"
+  if command -v pandoc &>/dev/null; then
+    pandoc -f html -t markdown --wrap=none --reference-links=false --markdown-headings=atx "$html_file" 2>/dev/null | grep -vE '^::+[[:space:]]*(\{[^}]*\})?[[:space:]]*$'
+  elif [ -f "$HOME/.claude/skills/markitdown/MarkItDown.py" ]; then
+    python3 "$HOME/.claude/skills/markitdown/MarkItDown.py" "$html_file" 2>/dev/null
+  else
+    cat "$html_file"
+  fi
+}
+
+extract_readability() {
+  local html_file="$1"
+  local out; out="$(_mktemp)"
+  if NODE_PATH="$NODE_PATH_VAL" node "$SCRIPT_DIR/fetch-extract.js" "$html_file" > "$out" 2>/dev/null; then
+    log "INFO" "readability: extracted"
+  else
+    log "INFO" "readability: fallback (full html)"
+    cat "$html_file" > "$out"
+  fi
+  echo "$out"
+}
+
+# --- output truncation ---
+
+emit_markdown() {
+  local cache_key="$1"
+  local cache_path="$CACHE_DIR/$cache_key.md"
+  local size
+  size=$(wc -c < "$cache_path" | tr -d ' ')
+
+  if [ "$size" -le "$MAX_OUTPUT_CHARS" ]; then
+    cat "$cache_path"
+    log "INFO" "output" ",\"total_chars\":$size,\"truncated\":false"
+    return
+  fi
+
+  # smart truncation: head + headings + tail
+  head -c 8000 "$cache_path"
+  echo ""; echo ""
+
+  local headings
+  headings=$(grep -E '^#{1,3} ' "$cache_path" 2>/dev/null | head -20)
+  if [ -n "$headings" ]; then
+    echo "#### Headings"
+    echo "$headings"
+    echo ""; echo "---"; echo ""
+  fi
+
+  tail -c 3000 "$cache_path"
+  echo ""; echo ""
+  echo "---"
+  echo "*[truncated at ${size} chars — full content cached at \`${cache_path}\"]*"
+  log "INFO" "output" ",\"total_chars\":$size,\"truncated\":true"
+}
+
+# --- fetchers ---
+
+fetch_curl() {
+  local url="$1" timeout="$2"
+  local out="$(_mktemp)"
+  local meta="$(_mktemp)"
+  local ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+  for attempt in $(seq 1 "$CURL_RETRIES"); do
+    local start; start=$(date +%s%N)
+    local ec=0
+    curl -sL --max-time "$timeout" --max-filesize "$MAX_RESPONSE_BYTES" \
+      -o "$out" -w "%{content_type}" \
+      -A "$ua" \
+      -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8" \
+      -H "Accept-Language: en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7,ja;q=0.6" \
+      "$url" 2>/dev/null > "$meta" || ec=$?
+
+    local elapsed; elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
+    if [ "$ec" -ne 0 ]; then
+      log "WARN" "curl fail" ",\"attempt\":$attempt,\"ms\":$elapsed"
+      [ "$attempt" -lt "$CURL_RETRIES" ] && sleep $((attempt * 2))
+      continue
+    fi
+
+    log "INFO" "curl ok" ",\"attempt\":$attempt,\"ms\":$elapsed"
+
+    # content-type guard: reject videos, images, archives, binaries
+    local ctype
+    ctype="$(cat "$meta" | tr '[:upper:]' '[:lower:]')"
+    case "$ctype" in
+      text/html*|text/plain*|application/pdf*|application/json*|'')
+        ;; # allowed
+      *)
+        log "WARN" "curl: blocked content-type $ctype"
+        return 1 ;;
+    esac
+
+    # JS challenge check
+    if grep -qi 'cloudflare\|challenge-platform\|captcha\|js-challenge' "$out" 2>/dev/null; then
+      log "INFO" "curl: js challenge, falling through"
+      return 1
+    fi
+    echo "$out"
+    return 0
+  done
+  return 1
+}
+
+fetch_playwright() {
+  local url="$1" timeout="$2"
+  local out; out="$(_mktemp)"
+  [ ! -f "$SCRIPT_DIR/fetch-url-playwright.js" ] && { log "ERROR" "playwright script not found"; return 1; }
+
+  local start; start=$(date +%s%N)
+  if NODE_PATH="$NODE_PATH_VAL" node "$SCRIPT_DIR/fetch-url-playwright.js" "$url" "$out" 2>/dev/null; then
+    if [ -s "$out" ] && ! grep -q '^FETCH_ERROR:' "$out"; then
+      local elapsed; elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
+      log "INFO" "playwright ok" ",\"ms\":$elapsed"
+      echo "$out"
+      return 0
+    fi
+  fi
+  log "WARN" "playwright fail"
+  return 1
+}
+
+# --- main ---
+
+log "INFO" "start"
+URL_NORM="$(normalize_url "$URL")"
+KEY="$(cache_key "$URL_NORM")"
+
+# 1. cache check
+if cache_get "$KEY"; then
+  emit_markdown "$KEY"
+  log "INFO" "done (cached)"
+  exit 0
+fi
+
+# 2. security
+security_check "$URL"
+
+# 3. domain route
+HOST="$(echo "$URL_NORM" | sed -E 's|^https?://([^/?#]+).*|\1|' | tr '[:upper:]' '[:lower:]')"
+if [ -n "$FORCE_MODE" ]; then
+  STRATEGY="$FORCE_MODE"
+  log "INFO" "strategy=$STRATEGY (forced)" ",\"host\":\"$HOST\""
+else
+  STRATEGY="$(domain_strategy "$HOST")"
+  log "INFO" "strategy=$STRATEGY" ",\"host\":\"$HOST\""
+fi
+
+html_file=""
+
+case "$STRATEGY" in
+  curl)
+    html_file="$(fetch_curl "$URL" "$CURL_TIMEOUT" || true)" ;;
+
+  readability)
+    html_file="$(fetch_curl "$URL" "$CURL_TIMEOUT" || true)"
+    if [ -z "$html_file" ]; then
+      log "INFO" "readability: curl failed, retry playwright"
+      html_file="$(fetch_playwright "$URL" "$PLAYWRIGHT_TIMEOUT" || true)"
+    fi
+    [ -n "$html_file" ] && html_file="$(extract_readability "$html_file")" ;;
+
+  playwright)
+    html_file="$(fetch_playwright "$URL" "$PLAYWRIGHT_TIMEOUT" || true)"
+    [ -n "$html_file" ] && html_file="$(extract_readability "$html_file")" ;;
+
+  pdf)
+    pdf_tmp="$(_mktemp)"
+    if curl -sL --max-time 30 --max-filesize "$MAX_RESPONSE_BYTES" -A "Mozilla/5.0" "$URL" > "$pdf_tmp" 2>/dev/null; then
+      # Try markitdown first
+      md_ok=false
+      if [ -f "$HOME/.claude/skills/markitdown/MarkItDown.py" ]; then
+        python3 "$HOME/.claude/skills/markitdown/MarkItDown.py" "$pdf_tmp" 2>/dev/null > "${pdf_tmp}.md" && md_ok=true
+      fi
+
+      if $md_ok && [ -s "${pdf_tmp}.md" ]; then
+        # Quality check: short lines or no markdown structure → schedule marker fallback
+        short_lines=$(awk 'length<20' "${pdf_tmp}.md" 2>/dev/null | wc -l)
+        md_struct=$(grep -cE '\||\#|\$|\*\*' "${pdf_tmp}.md" 2>/dev/null || true)
+        if [ "$short_lines" -gt 50 ] || [ "$md_struct" -lt 3 ]; then
+          log "INFO" "pdf quality low" ",\"short_lines\":$short_lines,\"md_struct\":$md_struct"
+          if [ -x "$HOME/bin/marker-remote" ]; then
+            log "INFO" "fallback marker-remote"
+            if "$HOME/bin/marker-remote" "$pdf_tmp" "${pdf_tmp}.md" 2>/dev/null; then
+              md_ok=true
+            fi
+          fi
+        fi
+      fi
+
+      if $md_ok && [ -s "${pdf_tmp}.md" ]; then
+        cat "${pdf_tmp}.md" | cache_write "$KEY"
+        log "INFO" "done (pdf)"
+        emit_markdown "$KEY"
+        exit 0
+      fi
+    fi
+    log "WARN" "pdf failed" ;;
+
+  auto)
+    try1="$(fetch_curl "$URL" "$CURL_TIMEOUT" || true)"
+    if [ -n "$try1" ]; then
+      try1="$(extract_readability "$try1")"
+      if grep -q '<!-- title:' "$try1" 2>/dev/null; then
+        html_file="$try1"
+      else
+        log "INFO" "auto: readability no match, retry playwright"
+        html_file="$(fetch_playwright "$URL" "$PLAYWRIGHT_TIMEOUT" || true)"
+        [ -n "$html_file" ] && html_file="$(extract_readability "$html_file")"
+      fi
+    else
+      html_file="$(fetch_playwright "$URL" "$PLAYWRIGHT_TIMEOUT" || true)"
+      [ -n "$html_file" ] && html_file="$(extract_readability "$html_file")"
+    fi ;;
+esac
+
+# 3b. GitHub API fallback (when curl fails on github.com repo pages)
+if [ -z "$html_file" ] || [ ! -s "$html_file" ]; then
+  if [ "$HOST" = "github.com" ]; then
+    gh_repo="$(echo "$URL_NORM" | sed -nE 's|^https?://github\.com/([^/]+)/([^/]+)(/.*)?$|\1 \2|p')"
+    if [ -n "$gh_repo" ]; then
+      gh_owner="${gh_repo%% *}"
+      gh_repo_name="${gh_repo#* }"
+      log "INFO" "github api fallback" ",\"owner\":\"$gh_owner\",\"repo\":\"$gh_repo_name\""
+
+      gh_meta="$(_mktemp)"
+      gh_out="$(_mktemp)"
+
+      if command -v jq &>/dev/null && \
+         curl_auth "https://api.github.com/repos/$gh_owner/$gh_repo_name" 10 \
+           > "$gh_meta" 2>/dev/null; then
+        readme_b64="$(curl_auth \
+          "https://api.github.com/repos/$gh_owner/$gh_repo_name/readme" 10 \
+          2>/dev/null | jq -r '.content // ""' 2>/dev/null)"
+        readme_text=""
+        [ -n "$readme_b64" ] && readme_text="$(echo "$readme_b64" | base64_decode || true)"
+
+        name="$gh_owner/$gh_repo_name"
+        {
+          echo "# $name"
+          echo ""
+          jq -r '
+            "**Stars**: \(.stargazers_count // 0) **Forks**: \(.forks_count // 0) **Language**: \(.language // "N/A")",
+            "**License**: \((.license // {}).spdx_id // "N/A")",
+            "**Description**: \(.description // "N/A")",
+            "**Topics**: \((.topics // []) | join(", "))",
+            "**Created**: \(.created_at // "N/A") **Updated**: \(.updated_at // "N/A")",
+            empty
+          ' "$gh_meta" 2>/dev/null
+          echo ""
+          echo "---"
+          echo ""
+          [ -n "$readme_text" ] && echo "$readme_text" || echo "*README not available via API*"
+        } > "$gh_out"
+
+        cp "$gh_out" "$CACHE_DIR/$KEY.md"
+        log "INFO" "done (github api)"
+        emit_markdown "$KEY"
+        exit 0
+      fi
+    fi
+  fi
+  die "all methods failed"
+fi
+
+# 4. convert + cache + output (truncated)
+mkdir -p "$CACHE_DIR"
+html_to_md "$html_file" > "$CACHE_DIR/$KEY.md"
+emit_markdown "$KEY"
+log "INFO" "done"

@@ -1,0 +1,34 @@
+{
+  "vault": "<obsidian-vault-path>",
+  "short_map": {
+    "技术": "tech",
+    "组织": "power",
+    "认知": "mind",
+    "数学": "method",
+    "生活": "life",
+    "阅读": "reading",
+    "项目": "projects"
+  },
+  "memory_path": "<claude-memory-path>",
+  "prompt_path": "<archive-template-path>",
+  "categories": ["技术", "组织", "认知", "数学", "生活", "阅读", "项目"],
+  "files": {
+    "tech": "tech.md",
+    "power": "power.md",
+    "mind": "mind.md",
+    "method": "method.md",
+    "life": "life.md",
+    "reading": "reading.md",
+    "projects": "projects.md"
+  },
+  "archive_dir": "archive",
+  "index_files": {
+    "tech": "tech.idx",
+    "power": "power.idx",
+    "mind": "mind.idx",
+    "method": "method.idx",
+    "life": "life.idx",
+    "reading": "reading.idx",
+    "projects": "projects.idx"
+  }
+}

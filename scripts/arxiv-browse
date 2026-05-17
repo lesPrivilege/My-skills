@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""
+On-demand arXiv paper browsing with keyword/author filtering and DeepSeek summarization.
+
+Usage:
+  arxiv-browse today
+  arxiv-browse yesterday
+  arxiv-browse last N days
+  arxiv-browse YYYY-MM-DD to YYYY-MM-DD
+  arxiv-browse --keywords transformer,moE --categories cs.LG,stat.ML
+
+Output: ~/reading-notes/{date}_{slug}.md (reading-companion format)
+
+Strategy: fetches arXiv HTML listing pages (robust, no API rate limit),
+          then calls arXiv API only for paper detail enrichment.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import ssl
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+
+DEFAULT_CATEGORIES = ["cs.LG", "cs.AI", "cs.CL"]
+CONFIG_PATH = os.path.expanduser("~/.config/arxiv-browse.json")
+
+def load_config():
+    """Load keywords/authors from ~/.config/arxiv-browse.json, fall back to defaults."""
+    defaults = {
+        "keywords": [
+            "distillation", "MoE", "RLHF", "alignment",
+            "scaling law", "chain-of-thought",
+        ],
+        "authors": [
+            "Dario Amodei", "Paul Christiano", "Jan Leike",
+            "Noam Shazeer", "William Fedus", "Tri Dao",
+            "John Schulman", "Ilya Sutskever",
+            "Geoffrey Hinton", "Jared Kaplan",
+        ],
+    }
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        # Merge: JSON overrides defaults, missing keys keep defaults
+        for k in defaults:
+            if k not in cfg or not cfg[k]:
+                cfg[k] = defaults[k]
+        return cfg
+    except (FileNotFoundError, json.JSONDecodeError):
+        return defaults
+DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+READING_NOTES = os.path.expanduser("~/Documents/Obsidian/reading-notes")
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+
+def eprint(*a, **kw):
+    print(*a, file=sys.stderr, **kw)
+
+
+def parse_date(s: str) -> date:
+    """Parse YYYY-MM-DD or shorthand. No external dependencies."""
+    s = s.strip().lower()
+    today = date.today()
+    if s == "today":
+        return today
+    if s == "yesterday":
+        return today - timedelta(days=1)
+    # Try YYYY-MM-DD
+    try:
+        parts = s.split("-")
+        return date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (IndexError, ValueError):
+        raise ValueError(f"cannot parse date: {s}")
+
+
+def slugify(title: str) -> str:
+    slug = title.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug[:50].strip("-")
+    return slug.rstrip("-")
+
+
+def _ssl_ctx():
+    """Create SSL context that works on macOS without certifi dance."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def fetch_text(url: str, timeout: int = 30) -> Optional[str]:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx())
+        return resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        eprint(f"Fetch error: {url[:80]} → {e}")
+        return None
+
+
+def matches_filter(title: str, summary: str, authors_str: str,
+                   keywords: list, author_orgs: list, debug: bool = False) -> tuple:
+    if not keywords and not author_orgs:
+        return True
+    # Match against title only (abstract mentions are noise)
+    title_lower = title.lower()
+    for kw in keywords:
+        kw_lower = kw.lower()
+        if len(kw_lower) <= 3:
+            if re.search(r'\b' + re.escape(kw_lower) + r'\b', title_lower):
+                return True
+        else:
+            if kw_lower in title_lower:
+                return True
+    for org in author_orgs:
+        if org.lower() in authors_str.lower():
+            return True
+    return False
+
+
+def fetch_papers(categories: list, date_from: date, date_to: date) -> list:
+    """Fetch papers by scraping arXiv listing pages."""
+    papers = []
+    today = date.today()
+
+    # /new covers the latest announcements (today if Apr 29, or the most recent
+    # announcement date). For recent papers this is the best source.
+    # For historical dates, use arXiv search endpoint.
+    days_ago = (today - date_to).days if date_to <= today else 0
+
+    if days_ago <= 1:
+        _fetch_new_listings(categories, papers)
+    else:
+        _fetch_via_search_api(categories, date_from, date_to, papers)
+
+    return papers
+
+
+def _fetch_via_search_api(categories: list, date_from: date, date_to: date, papers: list):
+    """Fetch historical papers via arXiv web search (not export API).
+    Returns Atom XML which we parse directly.
+    """
+    seen_ids = {p["id"] for p in papers}
+    # Fetch all categories in one compound query to minimize API calls
+    cat_query = "+OR+".join(f"cat:{c}" for c in categories)
+    url = (
+        f"http://export.arxiv.org/api/query?"
+        f"search_query=({cat_query})+AND+"
+        f"submittedDate:[{date_from.strftime('%Y%m%d')}0000+"
+        f"TO+{date_to.strftime('%Y%m%d')}2359]&"
+        f"start=0&max_results=300&sortBy=submittedDate&sortOrder=descending"
+    )
+    eprint(f"  arXiv API ({date_from}→{date_to}, {len(categories)} cats)...")
+    time.sleep(20)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        resp = urllib.request.urlopen(req, timeout=60, context=_ssl_ctx())
+        xml_data = resp.read().decode()
+    except Exception as e:
+        eprint(f"  API error: {e}")
+        return
+
+    root = ET.fromstring(xml_data)
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    for entry in root.findall("atom:entry", ns):
+        pid_el = entry.find("atom:id", ns)
+        pid = ""
+        if pid_el is not None:
+            m = re.search(r"/(\d+\.\d+)", pid_el.text or "")
+            pid = m.group(1) if m else ""
+        if not pid or pid in seen_ids:
+            continue
+
+        title_el = entry.find("atom:title", ns)
+        title = re.sub(r"\s+", " ", (title_el.text or "").strip()) if title_el is not None else ""
+
+        summary_el = entry.find("atom:summary", ns)
+        summary = re.sub(r"\s+", " ", (summary_el.text or "").strip()) if summary_el is not None else ""
+
+        published_el = entry.find("atom:published", ns)
+        pub_date = (published_el.text or "")[:10] if published_el is not None else ""
+
+        authors = []
+        for a_el in entry.findall("atom:author", ns):
+            n_el = a_el.find("atom:name", ns)
+            if n_el is not None and n_el.text:
+                authors.append(n_el.text.strip())
+
+        cats = []
+        for c_el in entry.findall("atom:category", ns):
+            term = c_el.get("term", "")
+            if term:
+                cats.append(term)
+
+        papers.append({
+            "id": pid, "title": title, "summary": summary,
+            "authors": authors, "categories": cats, "date": pub_date,
+        })
+        seen_ids.add(pid)
+
+
+def _fetch_new_listings(categories: list, papers: list):
+    """Fetch from arXiv's /new listing pages (today's announcements)."""
+    for cat in categories:
+        url = f"https://arxiv.org/list/{cat}/new"
+        eprint(f"  Listing: {cat}/new")
+        html = fetch_text(url, timeout=45)
+        if not html:
+            continue
+        _parse_listing_html(html, cat, papers)
+
+
+
+def _parse_listing_html(html: str, primary_cat: str, papers: list):
+    """Extract paper entries from arXiv listing HTML.
+
+    Each paper is in a <dt> + <dd> pair. We extract from <dd>.
+    """
+    seen_ids = {p["id"] for p in papers}
+
+    # Split into dt/dd pairs
+    # arXiv listing: <dt>...</dt>\n<dd>...</dd>
+    entries = re.split(r"<dt[^>]*>", html)
+    for entry in entries[1:]:  # skip everything before first <dt>
+        # Extract arXiv ID
+        id_match = re.search(r"/abs/(\d+\.\d+)", entry)
+        if not id_match:
+            continue
+        paper_id = id_match.group(1)
+        if paper_id in seen_ids:
+            continue
+
+        # Extract dd section
+        dd_match = re.search(r"<dd[^>]*>(.*?)</dd>", entry, re.DOTALL)
+        if not dd_match:
+            continue
+        dd = dd_match.group(1)
+
+        # Title
+        title_match = re.search(
+            r'<div\s+class\s*=\s*["\']list-title[^>]*>(?:<span[^>]*>Title:\s*</span>)?\s*(.*?)\s*</div>',
+            dd, re.DOTALL
+        )
+        title = ""
+        if title_match:
+            title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
+            title = re.sub(r"\s+", " ", title)
+
+        # Authors
+        authors_match = re.search(
+            r'<div\s+class\s*=\s*["\']list-authors[^>]*>(.*?)</div>',
+            dd, re.DOTALL
+        )
+        authors = []
+        if authors_match:
+            author_links = re.findall(r'>([^<]+)</a>', authors_match.group(1))
+            authors = [a.strip() for a in author_links if a.strip()]
+        authors_str = ", ".join(authors)
+
+        # Abstract/summary - typically hidden in a <p class='mathjax'> inside the dd
+        summary_match = re.search(
+            r'<p\s+class\s*=\s*["\']mathjax[^>]*>\s*(.*?)\s*</p>',
+            dd, re.DOTALL
+        )
+        summary = ""
+        if summary_match:
+            summary = re.sub(r"<[^>]+>", "", summary_match.group(1)).strip()
+            summary = re.sub(r"\s+", " ", summary)
+
+        # Categories (subjects)
+        subjects_match = re.search(
+            r'<div\s+class\s*=\s*["\']list-subjects[^>]*>(.*?)</div>',
+            dd, re.DOTALL
+        )
+        categories = []
+        if subjects_match:
+            cats = re.findall(r"\(([^)]+)\)", subjects_match.group(1))
+            categories = list(dict.fromkeys(c.strip() for c in cats if c.strip()))  # unique, ordered
+
+        papers.append({
+            "id": paper_id,
+            "title": title,
+            "summary": summary,
+            "authors": authors,
+            "categories": categories or [primary_cat],
+            "date": "",  # filled in later
+        })
+        seen_ids.add(paper_id)
+
+
+def enrich_with_api(papers: list):
+    """Batch-enrich papers with arXiv API data (dates, accurate categories)."""
+    if not papers:
+        return
+
+    # Use the arxiv package to fetch details by ID list
+    try:
+        import arxiv
+        client = arxiv.Client(page_size=100, delay_seconds=3, num_retries=3)
+        ids = [p["id"] for p in papers if not p["date"]]
+        if not ids:
+            return
+
+        # Batch in groups of 50
+        for i in range(0, len(ids), 50):
+            batch = ids[i:i+50]
+            try:
+                results = list(client.results(arxiv.Search(id_list=batch, max_results=len(batch))))
+                id_map = {}
+                for r in results:
+                    aid = r.get_short_id().split("v")[0]  # strip version suffix
+                    id_map[aid] = {
+                        "date": r.published.strftime("%Y-%m-%d"),
+                        "categories": r.categories,
+                        "summary": r.summary.strip().replace("\n", " "),
+                    }
+                for p in papers:
+                    if p["id"] in id_map:
+                        info = id_map[p["id"]]
+                        if not p["date"]:
+                            p["date"] = info["date"]
+                        if not p["categories"] or p["categories"] == [p.get("categories", [])]:
+                            p["categories"] = info["categories"]
+                        if not p["summary"]:
+                            p["summary"] = info["summary"]
+                eprint(f"  Enriched {len(id_map)} papers via API")
+            except Exception as e:
+                eprint(f"  API enrichment error (batch {i}): {e}")
+            time.sleep(2)
+    except ImportError:
+        eprint("  (arxiv package not installed, skipping API enrichment)")
+    except Exception as e:
+        eprint(f"  Enrichment error: {e}")
+
+
+# ── DeepSeek ──────────────────────────────────────────────────────────────────
+
+SUMMARIZE_PROMPT = """You are a professional paper analyst. Your output should be in English.
+
+Analyze the following paper abstract and produce a structured analysis in JSON format.
+
+Fields:
+- tldr: A concise 1-2 sentence summary of what this paper is about.
+- core_problem: 1-3 sentences. What gap or limitation does this work address?
+- core_approach: Numbered list of key mechanisms or design decisions. Each item: name + 1-2 sentence explanation. Focus on the method.
+- evidence: Main results, benchmarks, or empirical claims. Include key numbers. Skip if no quantitative evidence exists.
+- assumptions_open_questions: Bulleted list prefixed with ⚠️. Things the author assumes but doesn't prove, limitations acknowledged or unacknowledged, questions worth investigating. This section should be genuinely critical, not a restatement of the conclusion.
+
+Title: {title}
+
+Abstract: {summary}
+
+Respond with valid JSON only. No markdown fences, no preamble."""
+
+
+def summarize_paper(paper: dict, api_key: str) -> Optional[dict]:
+    prompt = SUMMARIZE_PROMPT.format(title=paper["title"], summary=paper["summary"])
+    payload = json.dumps({
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 1500,
+    }).encode()
+
+    req = urllib.request.Request(
+        DEEPSEEK_URL, data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=60, context=_ssl_ctx())
+        content = json.loads(resp.read().decode())["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        return json.loads(content)
+    except Exception as e:
+        eprint(f"  DeepSeek error for {paper['id']}: {e}")
+        return None
+
+
+def _fmt_approach(val) -> str:
+    """Format Core Approach: detect JSON list-of-dicts and render as markdown."""
+    if isinstance(val, list):
+        lines = []
+        for i, item in enumerate(val, 1):
+            if isinstance(item, dict):
+                name = item.get("name", "")
+                expl = item.get("explanation", "")
+                lines.append(f"{i}. **{name}**: {expl}")
+            else:
+                lines.append(f"{i}. {item}")
+        return "\n\n".join(lines)
+    if isinstance(val, str) and val.startswith("["):
+        try:
+            parsed = json.loads(val.replace("'", '"'))
+            return _fmt_approach(parsed)
+        except Exception:
+            pass
+    return str(val) if val else ""
+
+
+def _fmt_assumptions(val) -> str:
+    """Format Assumptions: detect JSON list and render as bullet list."""
+    if isinstance(val, list):
+        lines = []
+        for item in val:
+            item_str = str(item)
+            if not item_str.startswith("⚠️"):
+                item_str = f"⚠️ {item_str}"
+            lines.append(f"- {item_str}")
+        return "\n".join(lines)
+    if isinstance(val, str) and val.startswith("["):
+        try:
+            parsed = json.loads(val.replace("'", '"'))
+            return _fmt_assumptions(parsed)
+        except Exception:
+            pass
+    return str(val) if val else ""
+
+
+def save_paper_md(paper: dict, reading_dir: str) -> str:
+    os.makedirs(reading_dir, exist_ok=True)
+    ai = paper.get("AI", {})
+    filename = f"{paper.get('date', 'unknown')}_arxiv_{slugify(paper['title'])}.md"
+    path = os.path.join(reading_dir, filename)
+
+    content = f"""# {paper['title']}
+
+- **Source**: https://arxiv.org/abs/{paper['id']}
+- **Date**: {paper.get('date', '')}
+- **Authors / Org**: {', '.join(paper['authors'])}
+- **Type**: arxiv
+
+## Core Problem
+
+{ai.get('core_problem', '')}
+
+## Core Approach
+
+{_fmt_approach(ai.get('core_approach', ''))}
+
+## Evidence
+
+{ai.get('evidence', '')}
+
+## Assumptions & Open Questions
+
+{_fmt_assumptions(ai.get('assumptions_open_questions', ''))}
+"""
+    with open(path, "w") as f:
+        f.write(content.lstrip("\n"))
+    return path
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(description="arXiv browse and summarize")
+    parser.add_argument("query", nargs="*", help="today / yesterday / last N days / YYYY-MM-DD to YYYY-MM-DD")
+    parser.add_argument("--categories", help="Comma-separated categories (default: cs.LG,cs.AI,cs.CL)")
+    parser.add_argument("--keywords", help="Comma-separated filter keywords")
+    parser.add_argument("--authors", help="Comma-separated author orgs to track")
+    parser.add_argument("--output", help="Output dir (default: ~/reading-notes)")
+    parser.add_argument("--no-summarize", action="store_true", help="Skip DeepSeek, just list")
+    args = parser.parse_args()
+
+    # ── Parse date ────────────────────────────────────────────────────────────
+    today = date.today()
+    q = " ".join(args.query).lower() if args.query else ""
+
+    if not q or q == "today":
+        date_from = date_to = today
+    elif q == "yesterday":
+        date_from = date_to = today - timedelta(days=1)
+    elif q.startswith("last ") and q.endswith(" days"):
+        try:
+            n = int(q.split()[1])
+            date_from, date_to = today - timedelta(days=n), today
+        except (IndexError, ValueError):
+            eprint("Format: 'last N days'")
+            sys.exit(1)
+    elif " to " in q:
+        parts = q.split(" to ", 1)
+        date_from, date_to = parse_date(parts[0]), parse_date(parts[1])
+    else:
+        try:
+            date_from = date_to = parse_date(q)
+        except ValueError:
+            eprint(f"Unrecognized: {q}")
+            sys.exit(1)
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    cfg = load_config()
+    categories = [c.strip() for c in args.categories.split(",") if c.strip()] if args.categories else DEFAULT_CATEGORIES
+    if args.keywords and args.keywords.strip():
+        keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
+    else:
+        keywords = cfg["keywords"]
+    if args.authors and args.authors.strip():
+        author_orgs = [a.strip() for a in args.authors.split(",") if a.strip()]
+    else:
+        author_orgs = cfg["authors"]
+    reading_dir = os.path.expanduser(args.output) if args.output else READING_NOTES
+
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    if not api_key and not args.no_summarize:
+        eprint("⚠️  No API key set. Set OPENAI_API_KEY or DEEPSEEK_API_KEY.")
+        eprint("   Papers will be listed but not summarized.\n")
+    if not api_key:
+        args.no_summarize = True
+
+    eprint(f"Date range: {date_from} → {date_to}")
+    eprint(f"Categories: {', '.join(categories)}")
+    eprint(f"Keywords: {', '.join(keywords[:5])}...")
+    eprint()
+
+    # ── Fetch ─────────────────────────────────────────────────────────────────
+    papers = fetch_papers(categories, date_from, date_to)
+    eprint(f"\nRaw papers: {len(papers)}")
+
+    # Filter
+    matched = []
+    for p in papers:
+        authors_str = ", ".join(p["authors"])
+        if matches_filter(p["title"], p["summary"], authors_str, keywords, author_orgs):
+            matched.append(p)
+
+    eprint(f"After filter: {len(matched)} papers")
+
+    if not matched:
+        print("No papers matched the filter criteria.")
+        return
+
+    # Enrich with API (dates, precise categories)
+    eprint("\nEnriching with arXiv API...")
+    enrich_with_api(matched)
+
+    # ── Summarize ─────────────────────────────────────────────────────────────
+    if api_key and not args.no_summarize:
+        eprint(f"\nSummarizing {len(matched)} papers with DeepSeek...")
+        for i, p in enumerate(matched):
+            eprint(f"  [{i+1}/{len(matched)}] {p['id']} {p['title'][:60]}...")
+            ai = summarize_paper(p, api_key)
+            if ai:
+                p["AI"] = ai
+                path = save_paper_md(p, reading_dir)
+                eprint(f"    → {path}")
+            time.sleep(2)
+
+    # ── Report ────────────────────────────────────────────────────────────────
+    saved = sum(1 for p in matched if p.get("AI"))
+    print(f"\n## arXiv Browse ({date_from} → {date_to})")
+    print(f"**{len(matched)} papers matched** ({saved} summarized)\n")
+
+    for i, p in enumerate(matched, 1):
+        ai = p.get("AI", {})
+        tldr = ai.get("tldr", "") if ai else ""
+        sig = "✅" if ai else "  "
+        print(f"{sig} **{i}.** [{p['title']}](https://arxiv.org/abs/{p['id']})")
+        if p.get("date"):
+            print(f"   *{', '.join(p['authors'][:3])}* — *{p['date']}*")
+        else:
+            print(f"   *{', '.join(p['authors'][:3])}*")
+        if tldr:
+            print(f"   > {tldr}")
+        print()
+
+
+if __name__ == "__main__":
+    main()

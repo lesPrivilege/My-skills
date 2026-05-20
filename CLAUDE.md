@@ -1,73 +1,60 @@
-# Home Rules
+# My Skills — Commit & Collaboration Rules
 
-## Directories
+## Structure
 
 ```
-~/Projects/     active work, one folder each
-~/Scripts/      personal utility scripts
-~/Reading/      papers, magazines, reading notes
-~/Study/        exam prep materials
-~/Archives/     done projects, kept for reference
+my-skills/
+├── README.md         ← catalog — must match skills/ directory exactly
+├── CLAUDE.md         ← this file
+└── skills/
+    ├── <name>/
+    │   └── SKILL.md  ← frontmatter + usage
+    └── ...
 ```
+
+There are no other files in this repo. Scripts live in `~/Scripts/`, not here.
 
 ## Invariants
 
-1. **No loose files in ~/** — everything goes into one of the directories above.
-2. **One folder per project** — when done, move to `Archives/`.
-3. **Downloads/ is a inbox** — sort and clear. Never treat it as storage.
-4. **Claude output stays in the project folder** — never write to `~/` or `~/Downloads/`.
-5. **Scripts in `~/Scripts/`, not in `.claude/skills/`** — skills are just the invocation glue.
-6. **Confirm root cause before changing code** — if you find yourself typing a fix without a hypothesis, stop and read.
+1. **README inventory must include every directory in `skills/`.** Add a new skill → add a row. Remove a skill → remove the row. No stale entries.
+2. **Every SKILL.md must have YAML frontmatter** with `name` and `description`. The `description` field is the auto-trigger source — keep trigger keywords at the front.
+3. **One skill, one directory.** No splitting a skill across directories; no merging two skills into one. Each SKILL.md is self-contained.
+4. **No scripts or binaries in skill directories.** Scripts go in `~/Scripts/`. Skills reference them by absolute path.
+5. **Live is a symlink.** `~/.claude/skills/<name>/` → `skills/<name>/` in this repo. Edit here, changes take effect immediately. Do not edit the live directory directly.
 
-## Fetch Protocol
+## Commit Rules
 
-Source: `~/Scripts/fetch-url` (cache → domain route → fetch → readability → markdown)
+### When to commit
 
-### When fetching external URLs
+- Adding a new skill
+- Removing a skill (mark as deleted in README first)
+- Updating a SKILL.md (behavior changes, trigger words, usage)
+- Adding a new category to the README
 
-1. **WebFetch** (built-in) — docs, GitHub raw, arxiv, API.
-2. **`~/Scripts/fetch-url <url>`** — if WebFetch blocked. Uses local network (VPN,
-   proxy). Domain routing (raw/docs→curl, articles→readability, JS-heavy→Playwright).
-   24h SHA1 cache. Mozilla Readability extraction for clean article content. JSON
-   logs to stderr, markdown to stdout.
-3. **Ask user** — if all methods fail.
+Do NOT commit for:
+- Trivial typo fixes (just push)
+- Changes that only touch `~/Scripts/` (scripts are versioned separately)
 
-### Dependency note
-
-`~/Scripts/fetch-url` calls node scripts with `NODE_PATH=$(npm root -g)` for global
-modules (playwright, @mozilla/readability, jsdom). These are global installs.
-
-### Skills
-
-The `fetch` skill (`/fetch <url>`) encodes this protocol. Skills that fetch URLs
-reference this protocol — do not duplicate it.
-
-## Cleanup Logic
-
-When asked "check for trash" or "any redundancy?" — use ad hoc commands
-(`find`, `brew`, `du`, `pip list`, `mdfind`, `ls /Applications`) to
-discover issues. The invariants above define what's normal; anything
-outside them is suspect. Cross-reference when possible:
-
-- `/Applications/` vs `brew list --cask` → orphaned manual installs
-- `which -a python3` → multiple layers of Python (conda, pyenv, brew, .org)
-- `ls ~/Projects/` vs `~/Archives/` → stale or unclassified projects
-- `ls ~/Desktop/` `~/Downloads/` → misplaced coding files
-- `brew list --formula` vs `brew uses --installed` → orphaned libs
-- `~/Library/Application\ Support/` old entries → uninstalled app residues
-
-Safety: never delete or confirm anything final without user sign-off.
-
-## Goal-Driven Execution
-
-Transform imperative tasks into verifiable goals. Instead of "add validation",
-say "write tests for invalid inputs, then make them pass." For multi-step tasks,
-state a brief plan with verify checks:
+### Commit message format
 
 ```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
+<scope>: <action>
+
+Examples:
+  fetch: add Playwright fallback strategy
+  repo: remove aham-ppt, huashu-design, mini-srs-design
+  archive: align reading.md format with Archived.md spec
+  README: add audit & environment category
 ```
 
-Strong success criteria let me loop independently. Weak criteria ("make it work")
-drift.
+Scope is the skill directory name, or `repo` / `README` for structural changes.
+
+### Before commit
+
+1. `diff <(ls skills/ | sort) <(grep -oP '`\K[^`]+(?=`)' README.md | sort)` — README catalog must match skills/ directory. If mismatch, fix README first.
+2. Every new/existing SKILL.md must parse: `head -3 skills/<name>/SKILL.md | grep -q '^---$'` on lines 1 and 3.
+3. Verify symlink on live: `readlink ~/.claude/skills/<name>` points to this repo's `skills/<name>/`.
+
+### After commit
+
+Run `ls ~/.claude/skills/ | sort` to confirm live picked up the change. If a symlink is broken, the skill simply won't load — no crash, but log a warning.

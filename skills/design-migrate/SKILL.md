@@ -1,3 +1,8 @@
+---
+name: design-migrate
+description: Migrate visual changes from a redesigned prototype HTML back to the source code. Trigger: "migrate design", "sync视觉", "回遷", "apply design", "遷移設計".
+---
+
 # Skill: design-migrate
 
 Migrate visual changes from a redesigned prototype HTML back to the source code.

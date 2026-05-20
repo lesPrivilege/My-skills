@@ -1,18 +1,18 @@
 # My Skills
 
-A curated set of Claude Code skills implementing a complete personal knowledge workflow: input → reading & research → archival → synthesis → publishing, plus independent design/prototyping and exam-prep paths.
+All personal Claude Code skills, one source of truth. Symlinked to `~/.claude/skills/`.
 
 ## Design Philosophy
 
-Skills are **invocation glue**, not logic containers. Each `SKILL.md` describes what a skill does and how it maps to the real work — the heavy logic lives in external scripts (`scripts/` in this repo, deployed to the user's `~/Scripts/`).
+Skills are **invocation glue**, not logic containers. Each `SKILL.md` describes what a skill does and its trigger terms — the heavy logic lives in external scripts (`~/Scripts/`).
 
 Skills produce structured output (JSON, markdown) that downstream consumers can use without knowing which LLM generated it. This keeps the pipeline modular and provider-independent at the integration boundaries.
 
-The entire system serves a single arc:
+The core pipeline serves a single arc:
 
 **Input → Reading & Research → Archival → Synthesis → Publishing**
 
-Alongside this pipeline, independent paths handle design/prototyping (HTML-based high-fidelity mockups with a complete design philosophy) and exam preparation (OCR-to-structured-questions).
+Alongside this, independent paths handle exam preparation (OCR-to-structured-questions), design/prototyping, build automation, and system auditing.
 
 ## Pipeline
 
@@ -20,7 +20,7 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
                       ┌──────────────────┐
                       │   fetch           │
                       │  reading-companion │
-                      │   arxiv-browse     │
+                      │   arxiv-browse    │
                       └────────┬──────────┘
                                │
   ┌──────────────────┐   ┌──────────────────────┐
@@ -34,8 +34,8 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
   │  │  bank-fix      │              ▼
   │  └─ Phase 5 merge │   ┌──────────────────────┐
   │          │        │   │   paper-mill          │
-  │          ▼        │   │   (note synthesis      │
-  │  questions.json   │   │    engine, 4 modes)    │
+  │          ▼        │   │   (note synthesis     │
+  │  questions.json   │   │    engine, 4 modes)   │
   └──────────────────┘   └──────────┬───────────┘
                                     │
                                     ▼
@@ -45,12 +45,9 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
                             │  newsletter)       │
                             └──────────────────┘
 
-  Design/prototyping path (independent):
-  design-prototype → huashu-design → design-migrate (back to source)
-  aham-ppt → (standalone .pptx)
-
-  Project-level design constraint:
-  mini-srs-design (MiniSRS app visual spec)
+  Design & build (independent):
+  design-prototype → design-migrate (back to source)
+  build-apk (standalone Mnemos APK)
 ```
 
 ## Skill Inventory
@@ -59,24 +56,26 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
 
 | Skill | What it does |
 |-------|-------------|
-| `fetch` | Universal URL fetcher with domain routing, cache, readability extraction, and fallback chain |
+| `fetch` | Universal URL fetcher with domain routing, cache, readability, fallback chain |
 | `markitdown` | Convert PDF/EPUB/DOCX/PPTX/XLSX/HTML/images to Markdown |
-| `md-cleaner` | Strip ebook conversion artifacts (Calibre metadata, watermarks, ads) from markdown |
+| `md-cleaner` | Strip ebook conversion artifacts (Calibre metadata, watermarks, ads) |
 | `ocr-cleaner` | 5-phase pipeline: OCR'd textbook PDF → clean questions.json |
-| `md-to-cards` | Markdown notes → MiniSRS Q&A flashcard JSON via LLM extraction |
+| `md-to-cards` | Markdown notes → MiniSRS Q&A flashcard JSON via LLM |
+| `exam-prep-bank-fix` | Fix questions.json with missing answers / OCR noise / broken parser output |
 
 ### Reading & Research
 
 | Skill | What it does |
 |-------|-------------|
-| `reading-companion` | Deep analysis of papers, repos, articles with structured critical notes |
-| `arxiv-browse` | On-demand arXiv browsing with keyword/author filtering and LLM summarization |
+| `reading-companion` | Deep analysis of papers, repos, articles — structured critical notes |
+| `arxiv-browse` | On-demand arXiv browsing with keyword/author filtering + summarization |
+| `post` | Analyze/summarize community posts, threads, discussions |
 
 ### Archival & Synthesis
 
 | Skill | What it does |
 |-------|-------------|
-| `archive` | Claude session archival → Auto Memory updates + categorized notes to Obsidian vault |
+| `archive` | Session archival → Auto Memory + categorized notes to Obsidian vault |
 | `paper-mill` | 4-mode note synthesis: theme discovery → draft assembly → evidence enrichment → staleness review |
 
 ### Publishing
@@ -89,12 +88,34 @@ Alongside this pipeline, independent paths handle design/prototyping (HTML-based
 
 | Skill | What it does |
 |-------|-------------|
-| `huashu-design` | Complete HTML-based design capability: prototypes, animations, slides, design direction consulting, expert critique |
 | `design-prototype` | Package frontend project into single-file HTML visual spec |
-| `design-migrate` | Migrate visual changes from redesigned prototype back to source code |
-| `mini-srs-design` | Design system spec for the MiniSRS spaced-repetition app |
-| `aham-ppt` | Full AI-powered .pptx presentation deck generation (McKinsey/Deloitte standard) |
+| `design-migrate` | Migrate visual changes from redesigned HTML back to source code |
+| `build-apk` | Build Mnemos Android debug APK (vite → cap sync → gradle) |
 
-## Collaboration Rules
+### Audit & Environment
 
-`CLAUDE.md` at the repo root defines the conventions and invariants that govern how these skills interact — directory layout, fetch protocol, cleanup logic, and goal-driven execution rules.
+| Skill | What it does |
+|-------|-------------|
+| `project-audit` | Codebase audit: architecture, modules, routes, coupling, dead code, UI |
+| `source-audit` | Fact-check claims in docs/reviews against actual source code |
+| `system-audit` | Scan dev environment — installed tools, brew/pip/npm layers |
+| `ux-audit` | UX consistency: navigation, empty states, reachability, destructive ops |
+| `session-audit` | Audit/manage Claude Code local session storage |
+| `audit-usage` | Report Claude Code token consumption from local session files |
+| `claude-audit` | List all user additions to Claude Code since factory install |
+
+## Repo Structure
+
+```
+my-skills/
+├── README.md         ← this file — skill catalog
+├── CLAUDE.md         ← commit rules & collaboration conventions
+└── skills/
+    ├── <name>/
+    │   └── SKILL.md  ← frontmatter (name + description) + usage
+    ├── ...
+    └── <name>/
+        └── SKILL.md
+```
+
+Each `skills/<name>/` directory symlinks to `~/.claude/skills/<name>/`. The repo is the canonical source — edit here, it propagates live.

@@ -3,24 +3,28 @@
 ## Structure
 
 ```
-my-skills/
+~/.claude/skills/
 ├── README.md         ← catalog — must match skills/ directory exactly
 ├── CLAUDE.md         ← this file
-└── skills/
-    ├── <name>/
-    │   └── SKILL.md  ← frontmatter + usage
-    └── ...
+├── .gitignore
+├── fetch/            ← skill directories (each contains SKILL.md)
+│   └── SKILL.md
+├── project-audit/
+│   └── SKILL.md
+├── ...
+└── source-audit/
+    └── SKILL.md
 ```
 
-There are no other files in this repo. Scripts live in `~/Scripts/`, not here.
+Non-skill files at root level (`.gitignore`, `scripts/`) are ignored by the skill loader. Scripts live in `~/Scripts/` — copies in this repo are convenience snapshots.
 
 ## Invariants
 
-1. **README inventory must include every directory in `skills/`.** Add a new skill → add a row. Remove a skill → remove the row. No stale entries.
+1. **README inventory must include every skill directory at repo root.** Add a new skill → add a row. Remove a skill → remove the row. No stale entries.
 2. **Every SKILL.md must have YAML frontmatter** with `name` and `description`. The `description` field is the auto-trigger source — keep trigger keywords at the front.
 3. **One skill, one directory.** No splitting a skill across directories; no merging two skills into one. Each SKILL.md is self-contained.
 4. **No scripts or binaries in skill directories.** Scripts go in `~/Scripts/`. Skills reference them by absolute path.
-5. **Live is a symlink.** `~/.claude/skills/<name>/` → `skills/<name>/` in this repo. Edit here, changes take effect immediately. Do not edit the live directory directly.
+5. **Repo is live.** `~/.claude/skills/` IS this repo. Edits are immediate. Push from here.
 
 ## Commit Rules
 
@@ -51,10 +55,6 @@ Scope is the skill directory name, or `repo` / `README` for structural changes.
 
 ### Before commit
 
-1. `diff <(ls skills/ | sort) <(grep -oP '`\K[^`]+(?=`)' README.md | sort)` — README catalog must match skills/ directory. If mismatch, fix README first.
-2. Every new/existing SKILL.md must parse: `head -3 skills/<name>/SKILL.md | grep -q '^---$'` on lines 1 and 3.
-3. Verify symlink on live: `readlink ~/.claude/skills/<name>` points to this repo's `skills/<name>/`.
-
-### After commit
-
-Run `ls ~/.claude/skills/ | sort` to confirm live picked up the change. If a symlink is broken, the skill simply won't load — no crash, but log a warning.
+1. `comm -12 <(ls -d */ | sed 's|/||' | sort) <(grep -oP '`\K[^`]+(?=`)' README.md | sort)` — README catalog must match skill directories. If mismatch, fix README first.
+2. Every new/existing SKILL.md must parse: `head -3 <name>/SKILL.md | grep -q '^---$'` on lines 1 and 3.
+3. Verify: `ls ~/.claude/skills/ | sort` matches expected skills.

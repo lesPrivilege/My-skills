@@ -1,6 +1,6 @@
 # My Skills
 
-All personal Claude Code skills, one source of truth. Symlinked to `~/.claude/skills/`.
+All personal Claude Code skills, one source of truth. Managed directly at `~/.claude/skills/` (git repo).
 
 ## Design Philosophy
 
@@ -104,18 +104,23 @@ Alongside this, independent paths handle exam preparation (OCR-to-structured-que
 | `audit-usage` | Report Claude Code token consumption from local session files |
 | `claude-audit` | List all user additions to Claude Code since factory install |
 
+
 ## Repo Structure
 
 ```
-my-skills/
+~/.claude/skills/
 ├── README.md         ← this file — skill catalog
 ├── CLAUDE.md         ← commit rules & collaboration conventions
-└── skills/
-    ├── <name>/
-    │   └── SKILL.md  ← frontmatter (name + description) + usage
-    ├── ...
-    └── <name>/
-        └── SKILL.md
+├── .gitignore
+├── scripts/          ← utility scripts (referenced by skills via ~/Scripts/)
+├── fetch/            ← skill directories (each contains SKILL.md)
+│   └── SKILL.md
+├── project-audit/
+│   └── SKILL.md
+├── ...
+└── source-audit/
+    └── SKILL.md
 ```
 
-Each `skills/<name>/` directory symlinks to `~/.claude/skills/<name>/`. The repo is the canonical source — edit here, it propagates live.
+This repo is cloned directly to `~/.claude/skills/`. Claude Code loads any directory containing a `SKILL.md` as a skill. Non-skill files at root level (`scripts/`, `README.md`, `CLAUDE.md`, `.gitignore`) are ignored by the skill loader.
+

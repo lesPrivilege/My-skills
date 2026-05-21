@@ -55,6 +55,6 @@ Scope is the skill directory name, or `repo` / `README` for structural changes.
 
 ### Before commit
 
-1. `comm -12 <(ls -d */ | sed 's|/||' | sort) <(grep -oP '`\K[^`]+(?=`)' README.md | sort)` — README catalog must match skill directories. If mismatch, fix README first.
+1. `diff <(ls -d */ | sed 's|/||' | sort) <(grep -oP '`\K[^`]+(?=`)' README.md | sort)` — README catalog must match skill directories. If mismatch, fix README first.
 2. Every new/existing SKILL.md must parse: `head -3 <name>/SKILL.md | grep -q '^---$'` on lines 1 and 3.
 3. Verify: `ls ~/.claude/skills/ | sort` matches expected skills.

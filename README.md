@@ -99,7 +99,6 @@ Alongside this, independent paths handle exam preparation (OCR-to-structured-que
 | `project-audit` | Codebase audit: architecture, modules, routes, coupling, dead code, UI |
 | `source-audit` | Fact-check claims in docs/reviews against actual source code |
 | `system-audit` | Scan dev environment — installed tools, brew/pip/npm layers |
-| `ux-audit` | UX consistency: navigation, empty states, reachability, destructive ops |
 | `session-audit` | Audit/manage Claude Code local session storage |
 | `audit-usage` | Report Claude Code token consumption from local session files |
 | `claude-audit` | List all user additions to Claude Code since factory install |

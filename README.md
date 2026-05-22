@@ -1,28 +1,20 @@
-# My Skills
+# Harness Engineering Practices — AI 輔助知識工作的 skill pipeline
 
-All personal Claude Code skills, one source of truth. Managed directly at `~/.claude/skills/` (git repo).
+非 coding 場景的 harness 實踐體系：從資訊獲取、閱讀分析、歸檔整理、觀點合成到發佈輸出的完整 pipeline，以及獨立的考試準備、設計原型、建置自動化與系統審計路徑。每個 skill 是 Claude Code 的調用入口，直接管理在 `~/.claude/skills/`（git repo）。
 
-## Design Philosophy
+Skills are **invocation glue**, not logic containers. Each `SKILL.md` describes trigger terms and behavior—the heavy logic lives in external scripts (`~/Scripts/`). Skills produce structured output (JSON, markdown) that downstream consumers can use without knowing which LLM generated it. This keeps the pipeline modular and provider-independent at the integration boundaries.
 
-Skills are **invocation glue**, not logic containers. Each `SKILL.md` describes what a skill does and its trigger terms — the heavy logic lives in external scripts (`~/Scripts/`).
+### Pipeline
 
-Skills produce structured output (JSON, markdown) that downstream consumers can use without knowing which LLM generated it. This keeps the pipeline modular and provider-independent at the integration boundaries.
-
-The core pipeline serves a single arc:
-
-**Input → Reading & Research → Archival → Synthesis → Publishing**
-
-Alongside this, independent paths handle exam preparation (OCR-to-structured-questions), design/prototyping, build automation, and system auditing.
-
-## Pipeline
+These skills form an end-to-end harness for knowledge work. Each stage produces structured output that the next stage consumes:
 
 ```
-                      ┌──────────────────┐
-                      │   fetch           │
-                      │  reading-companion │
-                      │   arxiv-browse    │
-                      └────────┬──────────┘
-                               │
+                       ┌──────────────────┐
+                       │   fetch           │
+                       │  reading-companion │
+                       │   arxiv-browse    │
+                       └────────┬──────────┘
+                                │
   ┌──────────────────┐   ┌──────────────────────┐
   │ markitdown        │   │   archive            │
   │ md-cleaner        │   │   (session archival  │
@@ -49,6 +41,24 @@ Alongside this, independent paths handle exam preparation (OCR-to-structured-que
   design-prototype → design-migrate (back to source)
   build-apk (standalone Mnemos APK)
 ```
+
+The arc: discover information (fetch, reading-companion, arxiv-browse) → convert and clean it (markitdown, md-cleaner, ocr-cleaner) → archive to knowledge base (archive) → sift and synthesize (paper-mill) → publish (packaging). The exam-prep, design, and audit paths run independently alongside this core flow.
+
+### SKILL.md Format
+
+Every skill in this repo follows this frontmatter contract consumed by Claude Code's skill loader:
+
+```yaml
+---
+name: <skill-name>
+description: >
+  <one-line trigger description with keywords>
+---
+```
+
+- `name` — lowercase, hyphen-separated, matches the directory name
+- `description` — the auto-trigger source; trigger keywords go at the front, as Claude Code matches these against user intent
+- No additional fields. Everything else (workflow, references, constraints) lives in the markdown body after the frontmatter
 
 ## Skill Inventory
 
